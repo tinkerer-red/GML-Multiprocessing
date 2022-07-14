@@ -27,8 +27,8 @@ function MultiProcessingInit(){
 		show_debug_message("server has started for multi processing")
 	}else{
 		//hide the new process
-		//application_surface_draw_enable(false);
-		//draw_enable_drawevent(false)
+		application_surface_draw_enable(false);
+		draw_enable_drawevent(false)
 		
 		//define this process as a worker
 		__mp_define_worker();
