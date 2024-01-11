@@ -1,493 +1,791 @@
-//to do
-//auto close processes after a few seconds of no connection
-//on game close, close all processes
-
-#macro IS_IDE (string_pos("Runner.exe", string(parameter_string(0))) != 0)
-
-
-enum SOCKET_TYPE {
-	REQ,
-	REP,
-	PUSH,
-	PULL,
-	DEALER,
-	ROUTER,
-}
-
-function MultiProcessingInit(){
-	#macro __MP global.MultiProcessing
-	__MP = {};
+#region header
 	
-	//config
-	__MP.socket_type = network_socket_tcp;
+	#macro MP_Version "1.0.0"
+	show_debug_message("[Red's MultiProcessing] : Thank you for using Red's MultiProcessing!");
+	show_debug_message("[Red's MultiProcessing] : Version : "+MP_Version);
 	
-	if (is_main_process()){
-		//define this process as the server
-		__mp_define_server();
-		show_debug_message("server has started for multi processing")
-	}else{
-		//hide the new process
-		application_surface_draw_enable(false);
-		draw_enable_drawevent(false)
-		
-		//define this process as a worker
-		__mp_define_worker();
-	}
-}
-
-function remote_execute(_func, _args = [], _context = self, _callback = function(_result){}, _errback = function(_result){}){
-	var _request = __make_request(_func, _args, __MP.INDEX);
-	var _request_callback = __make_request_callback(_callback, _errback, _context);
-	
-	//cache the callback info
-	__MP.CALLBACKS[? string(__MP.INDEX)] = _request_callback;
-	
-	__MP.INDEX++
-	
-	//enqueue the request so we can send multiple requests through a single packet
-	array_push(__MP.request_queue, _request);
-	
-	//update indexes
-	//__MP.INDEX++;
-	
-}
-
-#region process handling
-function __mp_define_server() {
-	__MP.CALLBACKS = ds_map_create();
-	__MP.INDEX = 0;
-	__MP.PROCESSES = [];
-	__MP.worker_sockets = ds_list_create();
-	__MP.PROCESSES_INDEX = 0;
-	__MP.connected_workers = 0;
-	__MP.workers_connected = false;
-	__MP.workers_destroyed = false;
-	__MP.request_queue = []
-	__MP.pending_request_queue = []
-	
-	
-	__MP.step = __step_server;
-	__MP.async = __receive_async_server;
-	__MP.alarm0 = __alarm_server;
-	alarm_set(0, game_get_speed(gamespeed_fps)*5)
-	
-	//Config------------------------------------------------------------------------------------------\\
-	//                                                                                                ||
-	__MP.MAX_CPU_PERCENT = 100; //how much of each thread is allowed to be used.
-	__MP.NUMBER_OF_PROCESSES = 7; //How many threads to use, this needs to be replaced with a good way to count the number of threads
-	//                                                                                                ||
-	//------------------------------------------------------------------------------------------------//
-	
-	__MP.server = network_create_server(__MP.socket_type, 67623, 64)
-	
-	// parameter_string(0)="C:\Users\Katarina\AppData\Roaming\GameMaker-Studio\Runner.exe"
-	var RunnerPath = parameter_string(0);
-	
-	//if this is the main process
-	repeat (__MP.NUMBER_OF_PROCESSES){
-		show_debug_message("about to create workers")
-		__mp_create_worker();
-	}
-	
-	__MP.last_frame_time = current_time;
-	__MP.frame_time = 100/game_get_speed(gamespeed_fps)
-	__MP.ideal_frame_time = __MP.frame_time * (1 + __MP.MAX_CPU_PERCENT/100)
-}
-
-function __mp_define_worker() {
-	__MP.tasks = ds_priority_create();
-	__MP.process_index = (code_is_compiled()) ? real(parameter_string(2)) : real(parameter_string(4));
-	__MP.workers_connected = false;
-	
-	__MP.step = __step_worker
-	__MP.async = __receive_async_worker
-	__MP.alarm0 = __alarm_worker
-	alarm_set(0, game_get_speed(gamespeed_fps)*60)
-	
-	//switch to an always inactive room
-	__MP.ROOM = room_add();
-	room_goto(__MP.ROOM);
-		
-		
-	//kill all other instances which aren't the multiprocess
-	var _oi = object_index;
-	with (all){
-		if (object_index != _oi){ instance_destroy() }
-	}
-	
-	
-	//connect to the host
-	__MP.client = network_create_socket(__MP.socket_type)
-	__MP.connected = network_connect(__MP.client, "127.0.0.1", 67623) //this defaults to a PULL connection
-	__MP.workers_connected = __MP.connected;
-}
-
-function __mp_create_worker() {
-	if (!IS_IDE){
-		var _path = parameter_string(0);
-		var _args = "-process_index"+string(__MP.PROCESSES_INDEX);
-	}else{
-		var _path = _runner_get_path();
-		var _args = " -game "+_runner_get_game_path()+" -process_index"+string(__MP.PROCESSES_INDEX);
-	}
-	
-	var _proccess_id = execute_shell_simple(_path, _args);
-	//show_debug_message("_proccess_id = "+string(_proccess_id))
-	
-	//returns the process ID
-	return _proccess_id;
-}
 #endregion
 
-#region main process
-#region constructors
-function __make_request_callback(_callback, _errback, _context) {
-	var _struct = {}
-	_struct.context = _context; //the id of the object which originally called
+#region Environment Variables
 	
-	//the function which is run when the information is returned
-	if (typeof(_callback) == "method"){
-		_struct.callback = asset_get_index(script_get_name(_callback))
-	}else{
-		_struct.callback = _callback;
+	//instance id : used to keep track of what instance number the process is
+	global.__MultiProcessingInstanceID = int64(bool(EnvironmentGetVariableExists("MultiProcessingInstanceID")) ? EnvironmentGetVariable("MultiProcessingInstanceID") : string(0));
+	if (!EnvironmentGetVariableExists("MultiProcessingInstanceID")){
+		EnvironmentSetVariable("MultiProcessingInstanceID", string(global.__MultiProcessingInstanceID));
+	}
+	if (!EnvironmentGetVariableExists("MultiProcessingGameEnd")){
+		EnvironmentSetVariable("MultiProcessingGameEnd", "0");
+	}
+	if (!EnvironmentGetVariableExists("MultiProcessingMainProcessID")){
+		if (__mp_is_main_process()) {
+			EnvironmentSetVariable("MultiProcessingMainProcessID", string(ProcIdFromSelf()));
+		}
 	}
 	
-	if (typeof(_errback) == "method"){
-		_struct.err_back = asset_get_index(script_get_name(_errback))
-	}else{
-		_struct.err_back = _errback;
-	}
+	// Process ID list : used to keep track of all the processes, so when one is closed all of them can be closed
+	global.__MultiProcessingChildProcessID = [];
 	
-	return _struct;
-}
+	// Processor Count : used to determin how many processes we should spawn.
+	if (MultiProcessing_Unlock_Number_Of_Processes) {
+		global.__MultiProcessingProcessorCount = clamp(floor(cpu_numcpus()*MultiProcessing_Percent_Of_Cores+0.5), MultiProcessing_Number_Of_Processes_Min, MultiProcessing_Number_Of_Processes_Max);
+	}
+	else {
+		global.__MultiProcessingProcessorCount = clamp(
+				floor(cpu_numcpus()*MultiProcessing_Percent_Of_Cores+0.5),
+				MultiProcessing_Number_Of_Processes_Min,
+				min(cpu_numcpus()-1, MultiProcessing_Number_Of_Processes_Max)
+			);
+	}
 
-function __make_request(_func, _args, _index) {
-	var _struct = {};
-	
-	//convert a method into an asset index
-	if (typeof(_func) == "method"){
-		_struct.func = asset_get_index(script_get_name(_func))
-	}else{
-		_struct.func = _func;
-	}
-	
-	_struct.args = (is_array(_args)) ? _args : [_args]; //the arguments for the function above
-	_struct.index = _index; //the index used for the request, used to run the correct callback
-	
-	return _struct;
-}
 #endregion
 
-function __send_request(_request) {
-	//do stuff...
+#region Object Init
 	
-	var _socket = __MP.worker_sockets[| __MP.PROCESSES_INDEX];
-	__send_struct(_socket, _request)
+	//create the corosponding object
+	#macro __MP global.__MultiProcessing
+	if (!MultiProcessing_Require_Init_Script) {
+		time_source_start(time_source_create(time_source_game, 1, time_source_units_frames, MultiProcessingInit));
+	};
 	
-	__MP.PROCESSES_INDEX++;
-	if (__MP.PROCESSES_INDEX >= ds_list_size(__MP.worker_sockets)) { __MP.PROCESSES_INDEX -= ds_list_size(__MP.worker_sockets); } ;
-}
+#endregion
 
-function __receive_async_server(_async_load) {
-	var _type_event = ds_map_find_value(_async_load, "type");
-	switch(_type_event){
-		#region network_type_connect
-		case network_type_connect:
-			__MP.connected_workers++
+#region Internal
+	
+	#region Server/Worker Constructors
+		
+		function __mp_core() constructor {
 			
-			if (__MP.connected_workers >= __MP.NUMBER_OF_PROCESSES){
-				__MP.workers_connected = true;
+			connected = false;
+			life_time = time_source_create(time_source_game, MultiProcessing_TTL, time_source_units_seconds, game_end);
+			
+			#region Packet management
+				
+				#region Constructors
+					
+					static make_request = function(_func, _args, _index) constructor {
+						//convert a method into an asset index
+						if (typeof(_func) == "method") {
+							func = asset_get_index(script_get_name(_func))
+						}
+						else {
+							func = _func;
+						}
+						
+						args = (is_array(_args)) ? _args : [_args]; //the arguments for the function above
+						index = _index; //the index used for the request, used to run the correct callback
+					}
+					static make_sent_request = function(_tasks) constructor {
+						tasks = _tasks;
+						sent_time = get_timer();
+					}
+					
+				#endregion
+				
+				#region Data Management
+					
+					static send_struct = function(_socket, _struct) {
+						var _buff = encode_struct(_struct);
+						network_send_packet(_socket, _buff, buffer_tell(_buff));
+						buffer_delete(_buff);
+					}
+					static encode_struct = function(_struct) {
+						var _buff = buffer_create(1, buffer_grow, 1);
+						var _json = json_stringify(_struct);
+						
+						buffer_seek(_buff, buffer_seek_start, 0);
+						buffer_write(_buff, buffer_string, _json);
+						
+						return _buff;
+					}
+					static decode_struct = function(_buff){
+						buffer_seek(_buff, buffer_seek_start, 0);
+						var _json = buffer_read(_buff, buffer_string);
+						
+						try {
+							var _r = json_parse(_json);
+						}
+						catch(error) {
+							var _r = undefined;
+						}
+						
+						return _r;
+					}
+					
+				#endregion
+				
+				#region GML Events
+					
+					static gameend = function() {
+						
+					};
+					
+				#endregion
+				
+			#endregion
+			
+			#region useful function
+				
+				//used to spawn the subprocesses
+				static processes_start_all = function() {
+					var _length = array_length(global.__MultiProcessingChildProcessID)
+					var _alive_proc_count = 0;
+					var _i=0; repeat(_length) {
+						var _procId = global.__MultiProcessingChildProcessID[_i];
+						if (ProcIdExists(_procId)) {
+							_alive_proc_count+=1;
+						}
+						else {
+							array_delete(global.__MultiProcessingChildProcessID, _i, 1);
+							continue;
+						}
+					_i+=1;}//end repeat loop
+					
+					var _spawn_count = global.__MultiProcessingProcessorCount - _alive_proc_count
+					repeat(_spawn_count) {
+						SpawnMultiProcessing()
+					}
+					//if (_spawn_count > 0) {
+					//	time_source_start(time_source_create(time_source_game, 1, time_source_units_frames, SpawnMultiProcessing, [], _spawn_count));
+					//}
+				}
+				//inform followers to drink the kool-aid
+				static mass_suicide = function() {
+					EnvironmentSetVariable("MultiProcessingGameEnd", "1");
+				}
+				//check to see if leader has drank the kool-aid
+				static attempt_suicide = function() {
+					var _str = EnvironmentGetVariable("MultiProcessingGameEnd");
+					var _main_proc_id = EnvironmentGetVariable("MultiProcessingMainProcessID");
+					
+					var _bool = max(!ProcIdExists(_main_proc_id), bool(real(_str)))
+					if (_bool) {
+						//drink the kool-aid
+						game_end();
+					}
+				}
+				//keeps a child process alive for another 5 seconds
+				static stay_alive = function() {
+					time_source_reset(life_time);
+					time_source_start(life_time);
+				}
+				
+			#endregion
+			
+		}
+		function __mp_server() : __mp_core() constructor {
+			
+			#region Config
+				
+				networking_socket_type = MultiProcessing_Socket;
+				processer_count = global.__MultiProcessingProcessorCount;
+				percent_of_frame = MultiProcessing_Percent_Of_Frame;
+				networking_port = MultiProcessing_Port;
+				server = network_create_server(networking_socket_type, networking_port, processer_count)
+				
+			#endregion
+			
+			#region System
+				
+				if (USE_STRUCTS) {
+					request_callbacks = {}; //callbacks for requests which have been sent out
+				}
+				else {
+					request_callbacks = ds_map_create(); //callbacks for requests which have been sent out
+				}
+				pending_requests = ds_map_create(); //request which have been sent out but have not recieved a response
+				task_queue = []; //these are the tasks which have yet to be sent out to children
+				task_index = 0; //The number of tasks which have already been sent out
+				request_index = 0; //The number of bulk requests made, this is generally task_index/processor_count
+				worker_sockets = ds_list_create(); //a ds list of the sockets
+				worker_index = 0; //the current index of the worker we will be sending data out to next.
+				workers_connected = false; //is all of the workers are connected
+				
+				time_source_start(time_source_create(time_source_game, 1, time_source_units_seconds, keep_children_alive, [], -1));
+				
+			#endregion
+			
+			#region Methods
+				
+				static send_request = function(_request) {
+					var _socket = worker_sockets[| worker_index];
+					send_struct(_socket, _request);
+					
+					if (GC_SAFE) {
+						var _prending_request = new make_sent_request(_request);
+						pending_requests[? string(request_index)] = _prending_request
+					}
+					
+					worker_index+=1;
+					request_index+=1;
+					
+					if (worker_index >= ds_list_size(worker_sockets)) { worker_index -= ds_list_size(worker_sockets); } ;
+				}
+				
+				//check to see if any tasks need to be resent
+				static parse_sent_requests = function() {
+					if (!GC_SAFE) { return; };
+					
+					var _arr = ds_map_keys_to_array(pending_requests, []);
+					
+					var _i=0; repeat(array_length(_arr)) {
+						var _request_index = _arr[_i];
+						var _request_struct = pending_requests[? _request_index];
+						var _bulk_request = _request_struct.tasks;
+						
+						//remove tasks which have been completed
+						var _j=0; repeat(array_length(_bulk_request)) {
+							var _task = _bulk_request[_j];
+							var _exists = (USE_STRUCTS) ? struct_exists(request_callbacks, string(_task.index)) : ds_map_exists(request_callbacks, string(_task.index));
+							
+							if (!_exists) {
+								//reset the timer because we are still getting responses
+								_request_struct.sent_time = get_timer();
+								
+								array_delete(_bulk_request, _j, 1);
+								continue;
+							}
+						_j+=1;}//end repeat loop
+						
+						//cleanup the bulk request if all tasks are completed
+						if (array_length(_bulk_request) == 0) {
+							ds_map_delete(pending_requests, _request_index);
+							_i+=1;
+							continue;
+						}
+						
+						//if its been an entire second with no response resend it again.
+						static _frame_time = (1_000/MultiProcessing_Frame_Speed)*1_000;
+						if ((get_timer()-_request_struct.sent_time)/1000 > _frame_time) {
+							var _length = array_length(_bulk_request)
+							
+							//show_debug_message(":: MultiProcessing :: Pushing :: "+string(_length)+" tasks :: from request index "+string(_request_index));
+							task_queue = array_concat(task_queue, _bulk_request)
+							
+							ds_map_delete(pending_requests, _request_index);
+							
+						}
+						
+					_i+=1;}//end repeat loop
+				}
+				//used to send an update message to all children, can be used to update some global data
+				static inform_all_children = function(_request) {
+					var _i=0; repeat(ds_list_size(worker_sockets)) {
+						var _socket = worker_sockets[| _i];
+						send_struct(_socket, [_request])
+					_i+=1;}//end repeat loop
+				}
+				//used to inform all subprocesses to stay alive
+				static keep_children_alive = function() {
+					with (__MP) {
+						inform_all_children(new make_request(stay_alive, [], -1))
+					}
+				}
+				
+			#endregion
+			
+			#region GML Events
+				
+				//async event happens after step, and before end_step, so to ensure we get it the next frame pass tasks over right after the async event.
+				static end_step = function() {
+					parse_sent_requests();
+					
+					var _size = array_length(task_queue);
+					if (_size != 0) {
+						//early out when too much time has passed
+						var start_time = get_timer();	// 
+						static frame_cap = 1_000_000*percent_of_frame
+						var runTime = frame_cap/game_get_speed(gamespeed_fps);				// in Milliseconds. 1 frame is about 16ms. Have to leave time for other stuff too.
+						
+						var _workers = ds_list_size(worker_sockets);
+						var _task_per_worker = ceil(_size/_workers);
+						
+						var _bulk_request = [];
+						var _all_popped = false;
+						
+						static _task_per_frame_limit = (MultiProcessing_Tasks_Per_Frame < 0) ? infinity : MultiProcessing_Tasks_Per_Frame;
+						
+						var _bulk_request, _dt, _num_requests;
+						repeat(_workers) {
+							_num_requests = 0;
+							
+							var _tasks_for_worker = min(_task_per_worker, array_length(task_queue), _task_per_frame_limit)
+							_num_requests += _tasks_for_worker;
+							
+							if (_tasks_for_worker > 0) {
+								array_copy(_bulk_request, 0, task_queue, 0, _tasks_for_worker)
+								array_delete(task_queue, 0, _tasks_for_worker)
+								
+								//send the request out
+								send_request(_bulk_request);
+								_bulk_request = [];
+							}
+							
+							if (_num_requests >= _task_per_frame_limit) {
+								break;
+							}
+							
+							//early out so we can make use of the rest of the time between frames to build and send the requests out
+							if ((get_timer()-start_time) > runTime) {
+								break;
+							}
+							
+						}; //end outer repeat
+					}
+					
+				};
+				static async = function(_async_load) {
+					var _type_event = ds_map_find_value(_async_load, "type");
+					
+					var _indexes_to_destroy = [];
+					
+					switch(_type_event){
+						case network_type_connect: {
+							var _socket = ds_map_find_value(_async_load, "socket")
+							ds_list_add(worker_sockets, _socket)
+							
+							if (ds_list_size(worker_sockets) >= processer_count){
+								workers_connected = true;
+								time_source_start(time_source_create(time_source_game, 1, time_source_units_frames, window_focus));
+							}
+							
+							show_debug_message("Worker number \""+string(ds_list_size(worker_sockets))+"\" connected with socket: "+string(_socket))
+						break;}
+						case network_type_disconnect: {
+							if (MultiProcessing_Respawn) {
+								//this could be lower like 0.25 but to be safe we'll assure the process is fully killed from OS
+								time_source_start(time_source_create(time_source_game, 0.5, time_source_units_seconds, processes_start_all));
+							}
+						break;}
+						case network_type_data: {
+							var _buffer = ds_map_find_value(_async_load, "buffer")
+							var _socket = ds_map_find_value(_async_load, "id")
+							
+							var _returned_struct = decode_struct(_buffer);
+							var _return_tasks = _returned_struct.arr;
+							
+							if (is_array(_return_tasks)){
+								var _size = array_length(_return_tasks)
+								var _i=0; repeat(_size) {
+									var _task = _return_tasks[_i];
+							
+									//check the data and load the callbacks for the handled data
+									var _index = _task.index;
+									var _result = _task.result;
+									
+									//we have probably already processed that callback and this is a second safety pass
+									if (USE_STRUCTS) {
+										if (!struct_exists(request_callbacks, string(_index))) {
+											_i+=1;
+											continue;
+										}
+									}
+									else {
+										if (!ds_map_exists(request_callbacks, string(_index))) {
+											_i+=1;
+											continue;
+										}
+									}
+									
+									var _callback = (USE_STRUCTS) ? request_callbacks[$ string(_index)] : request_callbacks[? string(_index)];
+									
+									// If we sent a request right before recieving the result, this will be undefined on the second response so we can safely skip it.
+									if (_callback == undefined) {
+										//var _json = (USE_STRUCTS) ? json_stringify(request_callbacks, true) : json_encode(request_callbacks, true);
+										//show_error("index = "+string(_index)+"\n"+_json, true)
+										_i+=1; continue;
+									}
+									
+									_callback(_result);
+									
+									array_push(_indexes_to_destroy, _index)
+									
+								_i+=1}
+							}
+							
+							buffer_delete(_buffer)
+							
+						break;}
+					}
+					
+					//clean up those indexes from the request callbacks
+					if (USE_STRUCTS) {
+						var _i=0; repeat(array_length(_indexes_to_destroy)) {
+							struct_remove(request_callbacks, string(_indexes_to_destroy[_i]))
+						_i+=1;}//end repeat loop
+					}
+					else {
+						var _i=0; repeat(array_length(_indexes_to_destroy)) {
+							ds_map_delete(request_callbacks, string(_indexes_to_destroy[_i]))
+						_i+=1;}//end repeat loop
+					}
+					
+				};
+				static gameend = function() {
+					//processes_end_all();
+					mass_suicide();
+				}
+				
+			#endregion
+			
+		}
+		function __mp_worker() : __mp_core() constructor {
+			
+			#region Config
+				
+				networking_socket_type = MultiProcessing_Socket;
+				networking_port = MultiProcessing_Port;
+				
+			#endregion
+			
+			#region System
+				
+				window_hide()
+				game_set_speed(1, gamespeed_microseconds);
+				
+				//start the death timer
+				time_source_start(life_time);
+				
+				//switch to an always inactive room
+				ROOM = room_add();
+				room_goto(ROOM);
+				
+				//kill all other instances which aren't the multiprocess
+				var _oi = other.object_index;
+				with (all){
+					if (object_index != _oi){ instance_destroy() }
+				}
+		
+				//connect to the host
+				client = network_create_socket(networking_socket_type)
+				network_connect_async(client, "127.0.0.1", networking_port) //this defaults to a PULL connection
+				connected = false;
+				workers_connected = false;
+				
+			#endregion
+			
+			#region Methods
+				
+				static return_results = function(_results) {
+					//send all results back to the server
+					send_struct(client, _results)
+				}
+				static run_task = function(_struct) {
+					if (!is_undefined(_struct))
+					&& (is_struct(_struct)) {
+						var _func = _struct.func;
+						var _args = _struct.args;
+						var _index = _struct.index;
+						
+						var _length = array_length(_args);
+						
+						//An alternitive to the waterfall of doom as proposed by YellowAfterlife
+						// NOTE : I know this is really unnecessary optimization as most functions only require a few arguments. But I found it interesting at the time.
+						// This is not really needed for 2.3 but is needed for when i port this back to gm8 and gms1.4
+						if (_length > 16) {
+							show_error("Worker process \""+string(global.__MultiProcessingInstanceID)+"\" can not run function: \""+script_get_name(_func)+"\" with more then 16 arguments. \n arguments:"+string(_args), true)
+						}
+						
+						if (_length < 8) {
+							if (_length < 4) {
+								if (_length < 2) {
+									if (_length == 1) {
+										var _result = _func(_args[0])
+									}
+									else{
+										var _result = _func()
+									}
+								}
+								else {
+									if (_length == 3) {
+										var _result = _func(_args[0], _args[1], _args[2])
+									}
+									else{
+										var _result = _func(_args[0], _args[1])
+									}
+								}
+							}
+							else {
+								if (_length < 6) {
+									if (_length == 5) {
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4])
+									}
+									else{
+										var _result = _func(_args[0], _args[1], _args[2], _args[3])
+									}
+								}
+								else {
+									if (_length == 7) {
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6])
+									}
+									else{
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5])
+									}
+								}
+							}
+						}
+						else {
+							if (_length < 12) {
+								if (_length < 10) {
+									if (_length == 9) {
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8])
+									}
+									else{
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7])
+									}
+								}
+								else {
+									if (_length == 11) {
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10])
+									}
+									else{
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9])
+									}
+								}
+							}
+							else {
+								if (_length < 14) {
+									if (_length == 13) {
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12])
+									}
+									else{
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11])
+									}
+								}
+								else {
+									if (_length < 15) {
+										var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12], _args[13], _args[14])
+									}
+									else{
+										if (_length == 16) {
+											var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12], _args[13], _args[14], _args[15])
+										}
+										else {
+											var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12], _args[13])
+										}
+									}
+								}
+							}
+						}
+						
+						var _returned_struct = {};
+						_returned_struct.index = _index;
+						_returned_struct.result = _result;
+						
+						return _returned_struct
+					}
+					else {
+						show_error("Worker process \""+string(global.__MultiProcessingInstanceID)+"\" __MP.run_task() can not process supplied struct! \n struct:"+string(_struct), true)
+					}
+				}
+				
+			#endregion
+			
+			#region GML Events
+				
+				static end_step = function() {
+					attempt_suicide();
+				}
+				static async = function(_async_load) {
+					var _type_event = ds_map_find_value(_async_load, "type");
+					
+					switch(_type_event){
+						case network_type_connect: {
+							var _socket = ds_map_find_value(_async_load, "socket")
+						break;}
+						case network_type_disconnect: {
+							var _socket = ds_map_find_value(_async_load, "socket")
+							var _succeeded = ds_map_find_value(_async_load, "succeeded")
+							if (_succeeded == 0){
+								game_end()
+							}
+						break;}
+						case network_type_non_blocking_connect: {
+							connected = _async_load[? "succeeded"];
+							workers_connected = connected;
+						break;}
+						case network_type_data: {
+							var _buffer = ds_map_find_value(_async_load, "buffer");
+							var _socket = ds_map_find_value(_async_load, "id");
+							
+							var _bulk_request = decode_struct(_buffer);
+							
+							//Sometimes a buffer is loaded in chunks, but for the rest of those times this check is specifically for when data is lost through the TCP protocal, Gamemaker has a nasty habit of writing over memory which subprocesses are currently using, leading to getting an invalid buffer
+							if (_bulk_request == undefined) || (!is_array(_bulk_request)) { exit; };
+							
+							var _task;
+							var _size = array_length(_bulk_request);
+							
+							var _struct = {arr:[]};
+							var _i=0; repeat(_size) {
+								_task = _bulk_request[_i]
+								
+								// run the task
+								var _returned_data = run_task(_task);
+								array_push(_struct.arr, _returned_data);
+								
+							_i++;}//end repeat loop
+							
+							return_results(_struct)
+							
+							//postpone the timer as we have completed our goal.
+							stay_alive();
+							
+						break;}
+					}
+					
+				}
+				
+			#endregion
+			
+		}
+		
+	#endregion
+	
+	#region Functions
+		
+		function __mp_is_main_process() {
+			return (global.__MultiProcessingInstanceID == 0);
+		}
+		
+		//The init function : call this to initialize multi threading, if MultiProcessing_Require_Init_Script is set to true this will automatically be called as game start. 
+		function MultiProcessingInit() {
+			
+			if (global.__MultiProcessingProcessorCount == 0) {
+				///no reason to run the multi processing if we dont want to use any cores
+				__MP = {
+					workers_connected : false,
+					processer_count: 0,
+					task_index : 0,
+					end_step : function(){},
+					gameend : function(){},
+					async : function(_async_load){ show_message("Wait, h-how'd you do that?") },
+				}
+				
+				return;
 			}
 			
-			var _socket = ds_map_find_value(_async_load, "socket")
-			ds_list_add(__MP.worker_sockets, _socket)
-			
-			show_debug_message("Worker number \""+string(__MP.connected_workers)+"\" connected with socket: "+string(_socket))
-		break;
-		#endregion
-		
-		#region network_type_disconnect
-		case network_type_disconnect:
-			var _socket = ds_map_find_value(_async_load, "socket")
-			ds_list_delete(__MP.worker_sockets, ds_list_find_index(__MP.worker_sockets, _socket));
-			//if we didnt kill the workers, then spawn a new one.
-			if (!__MP.workers_destroyed){
-				__mp_create_worker()
+			// Find the correct process to spawn as
+			if (MultiProcessing_Spawn_Main_Process_First) {
+				if (__mp_is_main_process()) {
+					__MP = new __mp_server();
+				}
+				else{
+					__MP = new __mp_worker();
+				}
 			}
-		break;
-		#endregion
-		
-		#region network_type_data
-		case network_type_data:
-			var _buffer = ds_map_find_value(_async_load, "buffer")
-			var _socket = ds_map_find_value(_async_load, "id")
-			
-			var _returned_struct = __decode_struct(_buffer);
-			var _return_tasks = _returned_struct.arr;
-			
-			if (is_array(_return_tasks)){
-				var _size = array_length(_return_tasks)
-				
-				var _i = 0;
-				repeat(_size){
-					var _task = _return_tasks[_i];
-				
-					//check the data and load the callbacks for the handled data
-					var _index = _task.index;
-					var _result = _task.result; //if an error occurced and it timed out, -1 is the return
-				
-					var _struct = __MP.CALLBACKS[? string(_index)]
-				
-					if (_result == -1){
-						if instance_exists(_struct.context){
-							var _inst = _struct.context;
-							var _func = _struct.errback;
-							with (_inst) {_func(_result);}
-						}else{
-							_struct.errback(_result);
-						}
+			else {
+				if (__mp_is_main_process()) {
+					__MP = new __mp_worker();
+				}
+				else{
+					if (global.__MultiProcessingInstanceID == global.__MultiProcessingProcessorCount) {
+						__MP = new __mp_server();
 					}
-					else{
-						if instance_exists(_struct.context){
-							var _inst = _struct.context;
-							var _func = _struct.callback
-							with (_inst) {_func(_result);}
-						}else{
-							_struct.callback(_result);
-						}
+					else {
+						__MP = new __mp_worker();
 					}
-					ds_map_delete(__MP.CALLBACKS, string(_index))
-				
-					_i++
 				}
 			}
 			
-		break;
-		#endregion
-	}
-}
-
-function __step_server() {
-	var _size = array_length(__MP.request_queue);
-	if (_size != 0){
-		var _workers = ds_list_size(__MP.worker_sockets);
-		var _task_per_worker = ceil(_size/_workers);
-		
-		var _bulk_request = [];
-		var _all_popped = false;
-	
-		for (var _i = 0; _i < _workers; _i++){
-			for (var _j = 0; _j < _task_per_worker; _j++){
-				var _request = array_pop(__MP.request_queue)
-				array_push(_bulk_request, _request)
-				if (array_length(__MP.request_queue) == 0) {
-					var _all_popped = true;
-					break;
-				}
+			instance_create_depth(0, 0, -16000, objMultiProcessing);
+			
+			//init environment
+			if (__mp_is_main_process()) {
+				show_debug_message(":: MultiProcessing :: About to create workers.")
+				__MP.processes_start_all();
 			}
 			
-			if (array_length(_bulk_request) != 0){
-				//send the request out
-				__send_request(_bulk_request)
-				var _bulk_request = [];
-			}
-			
-			//early out so we can make use of the rest of the time between frames to build and send the requests out
-			var _dt = current_time - __MP.last_frame_time;
-			if (_dt >= __MP.ideal_frame_time){break;}
-			if (_all_popped) {break;}
-			
 		}
-	}
-	
-	__MP.last_frame_time = current_time;
-}
+		
+		//for use if you want to bind it to a button instead of instantly spawning it
+		function SpawnMultiProcessing() {
+			// duplicate current process by executing its own command line
+			EnvironmentSetVariable("MultiProcessingInstanceID", string(real(EnvironmentGetVariable("MultiProcessingInstanceID")) + 1));
+			array_push(global.__MultiProcessingChildProcessID, ExecProcessFromArgVAsync(GetArgVFromProcid(ProcIdFromSelf()))); // define child process id for later use
+		}
 
-function __alarm_server(){
-	alarm_set(0, game_get_speed(gamespeed_fps)*5)
-	processes_refresh_all()
-}
+	#endregion
 #endregion
 
-#region worker process
-function __receive_async_worker(_async_load) {
-	var _type_event = ds_map_find_value(_async_load, "type");
-	
-	switch(_type_event){
-		#region network_type_connect
-		case network_type_connect:
-			var _socket = ds_map_find_value(_async_load, "socket")
-		break;
-		#endregion
-		
-		#region network_type_disconnect
-		case network_type_disconnect:
-		case network_type_non_blocking_connect:
-			var _socket = ds_map_find_value(_async_load, "socket")
-			var _succeeded = ds_map_find_value(_async_load, "succeeded")
-			if (_succeeded == 0){
-				game_end()
-			}
-		break;
-		#endregion
-		
-		#region network_type_data
-		case network_type_data:
-			var _buffer = ds_map_find_value(_async_load, "buffer");
-			var _socket = ds_map_find_value(_async_load, "id");
-			
-			var _bulk_request = __decode_struct(_buffer);
-			for(var _i = 0; _i < array_length(_bulk_request); _i++){
-				var _task = _bulk_request[_i]
-				
-				//queue up the task
-				ds_priority_add(__MP.tasks, _task, _task.index)
-			
-				//instantly run the task
-				//__run_task(_task);
-			}
-		break;
-		#endregion
-	}
-}
-
-function __return_results(_results) {
-	//send all results back to the server
-	__send_struct(__MP.client, _results)
-}
-
-function __step_worker() {
-	//init the returned data
-	var _struct = {
-		arr: []
-	}
-	
-	
-	//deque and clean info
-	var _size = ds_priority_size(__MP.tasks)
-	repeat(_size){
-		var _task = ds_priority_delete_min(__MP.tasks);
-		
-		var _returned_data = __run_task(_task);
-		
-		array_push(_struct.arr, _returned_data);
-		
-		//this is where we should easy out if the process has too much on it's work load.
-	}
-	
-	if (_size){
-		__return_results(_struct)
-	}
-}
-
-function __run_task(_struct) {
-	if (!is_undefined(_struct))
-	&& (is_struct(_struct)){
-		var _func = _struct.func;
-		var _args = _struct.args;
-		var _index = _struct.index;
-		
-		//run the function with the correct number of arguments
-		switch (array_length(_args)) {
-			case 0:  var _result = _func() break;
-			case 1:  var _result = _func(_args[0]) break;
-			case 2:  var _result = _func(_args[0], _args[1]) break;
-			case 3:  var _result = _func(_args[0], _args[1], _args[2]) break;
-			case 4:  var _result = _func(_args[0], _args[1], _args[2], _args[3]) break;
-			case 5:  var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4]) break;
-			case 6:  var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5]) break;
-			case 7:  var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6]) break;
-			case 8:  var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7]) break;
-			case 9:  var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8]) break;
-			case 10: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9]) break;
-			case 11: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10]) break;
-			case 12: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11]) break;
-			case 13: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12]) break;
-			case 14: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12], _args[13]) break;
-			case 15: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12], _args[13], _args[14]) break;
-			case 16: var _result = _func(_args[0], _args[1], _args[2], _args[3], _args[4], _args[5], _args[6], _args[7], _args[8], _args[9], _args[10], _args[11], _args[12], _args[13], _args[14], _args[15]) break;
-			default:
-				show_error("Worker process \""+__MP.process_index+"\" can not run function: \""+script_get_name(_func)+"\" with more then 16 arguments. \n arguments:"+string(_args), true)
-			break;
-		}
-		
-		var _returned_struct = {};
-		_returned_struct.index = _index;
-		_returned_struct.result = _result;
-		
-		return _returned_struct
-	}
-}
-
-function __alarm_worker(){
-	game_end();
-}
+#region jsDoc
+/// @func    remote_execute()
+/// @desc    Execute a function with supplied arguments on a separate process, when a response is returned this will pass the function's return into the callback as an argument.
+///
+///          .
+///
+///          Note: This will trigger the async networking event, although this message will be processed by the multiprocessing handler
+/// @param   {Function} func : The function to execute.
+/// @param   {Array} arg : The arguments for the function.
+/// @param   {Function} callback : The function or method to be executed when a responce has been recieved, this will pass the function's return into the callback as an argument.
 #endregion
-
-#region data management
-function __send_struct(_socket, _struct){
-	var _buff = __encode_struct(_struct);
-	network_send_packet(_socket, _buff, buffer_tell(_buff));
-	buffer_delete(_buff)
-}
-
-function __encode_struct(_struct) {
-	//we are only doing it this way so in the future we can overwrite the encoding process with our own
-	var _buff = buffer_create(1, buffer_grow, 1);
-	var _json = json_stringify(_struct);
+function remote_execute(_func, _args = undefined, _callback = undefined) {
+	static empty_arr = []; //prevent the need to create new arrays every time
+	static empty_func = function(_result){}; //prevent the need to create new methods every time
 	
-	buffer_seek(_buff, buffer_seek_start, 0)
-	buffer_write(_buff, buffer_string, _json);
-	return _buff;
-}
-
-function __decode_struct(_buff){
-	buffer_seek(_buff, buffer_seek_start, 0)
-	var _json = buffer_read(_buff, buffer_string)
-	buffer_delete(_buff)
+	//is the first is null/undefined use the second
+	_args ??= empty_arr;
+	_callback ??= empty_func;
 	
-	return json_parse(_json);
+	with (__MP) {
+		var _request = new make_request(_func, _args, task_index);
+		var _request_callback = _callback;
+		
+		//cache the callback info
+		if (USE_STRUCTS) {
+			request_callbacks[$ string(task_index)] = _request_callback;
+		}
+		else {
+			request_callbacks[? string(task_index)] = _request_callback;
+		}
+		
+		//enqueue the request so we can send multiple requests through a single packet
+		array_push(task_queue, _request);
+		task_index++
+		
+	}
 }
+
+//define and send a request to every process immediately.
+
+#region jsDoc
+/// @func    remote_execute_all()
+/// @desc    Execute a function with supplied arguments on a separate process, when a response is returned this will pass the function's return into the callback as an argument.
+///
+///          .
+///
+///          Generally this is used to keep processes alive, or end them all, but it can also be used to update subprocesses to store bulk data on all processes.
+///
+///          .
+///
+///          Note: This will trigger the async networking event, although this message will be processed by the multiprocessing handler
+/// @param   {Function} func : The function to execute.
+/// @param   {Array} arg : The arguments for the function.
+/// @param   {Function} callback : The function or method to be executed when a responce has been recieved, this will pass the function's return into the callback as an argument.
 #endregion
-
-#region useful function
-function is_main_process(){
-	var _p_num = parameter_count();
-	var _is_main_process = true;
-	for (var _i = 0; _i < _p_num; _i++){
-		if (string_pos("-process_index", parameter_string(_i)) == 1){
-			_is_main_process = false;
+function remote_execute_all(_func, _args = undefined, _callback = undefined) {
+	static empty_arr = []; //prevent the need to create new arrays every time
+	static empty_func = function(_result){}; //prevent the need to create new methods every time
+	
+	//is the first is null/undefined use the second
+	_args ??= empty_arr;
+	_callback ??= empty_func;
+	
+	with (__MP) {
+		var _request = new make_request(_func, _args, task_index);
+		var _request_callback = _callback;
+		
+		//cache the callback info
+		if (USE_STRUCTS) {
+			request_callbacks[$ string(task_index)] = _request_callback;
 		}
-	}
-	return _is_main_process;
-}
-
-function processes_end_all(){
-	if (!__MP.workers_destroyed){
-		for (var _i = 0; _i < ds_list_size(__MP.worker_sockets); _i++){
-			remote_execute(game_end);
+		else {
+			request_callbacks[? string(task_index)] = _request_callback;
 		}
-		__MP.workers_destroyed = true;
-	}
-}
-
-function processes_start_all(){
-	if (__MP.workers_destroyed){
-		for (var _i = 0; _i < __MP.NUMBER_OF_PROCESSES; _i++){
-			__mp_create_worker()
-		}
-		__MP.workers_destroyed = false;
+		
+		//enqueue the request so we can send multiple requests through a single packet
+		inform_all_children(_request)
+		task_index++
 	}
 }
-
-function processes_refresh_all(){
-	if (!__MP.workers_destroyed){
-		for (var _i = 0; _i < ds_list_size(__MP.worker_sockets); _i++){
-			remote_execute(alarm_set, [0, game_get_speed(gamespeed_fps)*60]);
-		}
-		__MP.workers_destroyed = true;
-	}
-}
-#endregion
 
 
