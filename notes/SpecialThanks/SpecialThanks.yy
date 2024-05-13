@@ -1,9 +1,11 @@
 {
-  "resourceType": "GMNotes",
-  "resourceVersion": "1.1",
-  "name": "SpecialThanks",
-  "parent": {
-    "name": "SystemInfo",
-    "path": "folders/_Libraries/SystemInfo.yy",
+  "$GMNotes":"",
+  "%Name":"SpecialThanks",
+  "name":"SpecialThanks",
+  "parent":{
+    "name":"SystemInfo",
+    "path":"folders/_Libraries/SystemInfo.yy",
   },
+  "resourceType":"GMNotes",
+  "resourceVersion":"2.0",
 }

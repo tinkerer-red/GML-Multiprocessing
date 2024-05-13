@@ -1,11 +1,13 @@
 {
-  "resourceType": "GMScript",
-  "resourceVersion": "1.0",
-  "name": "scr_example",
-  "isCompatibility": false,
-  "isDnD": false,
-  "parent": {
-    "name": "xProcess",
-    "path": "folders/_Libraries/xProcess.yy",
+  "$GMScript":"",
+  "%Name":"scr_example",
+  "isCompatibility":false,
+  "isDnD":false,
+  "name":"scr_example",
+  "parent":{
+    "name":"xProcess",
+    "path":"folders/_Libraries/xProcess.yy",
   },
+  "resourceType":"GMScript",
+  "resourceVersion":"2.0",
 }

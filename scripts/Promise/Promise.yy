@@ -1,12 +1,12 @@
 {
   "$GMScript":"",
-  "%Name":"debug",
+  "%Name":"Promise",
   "isCompatibility":false,
   "isDnD":false,
-  "name":"debug",
+  "name":"Promise",
   "parent":{
-    "name":"Multi Processing",
-    "path":"Multi Processing.yyp",
+    "name":"GML Promise",
+    "path":"folders/_Libraries/GML Promise.yy",
   },
   "resourceType":"GMScript",
   "resourceVersion":"2.0",

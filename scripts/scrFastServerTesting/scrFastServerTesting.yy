@@ -1,11 +1,13 @@
 {
-  "resourceType": "GMScript",
-  "resourceVersion": "1.0",
-  "name": "scrFastServerTesting",
-  "isCompatibility": false,
-  "isDnD": false,
-  "parent": {
-    "name": "GML FastServerTesting",
-    "path": "folders/GML FastServerTesting.yy",
+  "$GMScript":"",
+  "%Name":"scrFastServerTesting",
+  "isCompatibility":false,
+  "isDnD":false,
+  "name":"scrFastServerTesting",
+  "parent":{
+    "name":"GML FastServerTesting",
+    "path":"folders/GML FastServerTesting.yy",
   },
+  "resourceType":"GMScript",
+  "resourceVersion":"2.0",
 }

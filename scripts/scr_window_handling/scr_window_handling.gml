@@ -12,7 +12,6 @@ function window_zoom() {
 
 function window_hide() {
 	window_set_size(0,0);
-	window_set_caption("subprocess");
 	window_set_max_height(0);
 	window_set_max_width(0);
 	application_surface_draw_enable(false);
